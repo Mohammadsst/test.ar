@@ -1,517 +1,341 @@
-# Copyright 2016-2018 Julien Danjou
-# Copyright 2017 Elisey Zanko
-# Copyright 2016 Étienne Bersac
-# Copyright 2016 Joshua Harlow
-# Copyright 2013-2014 Ray Holder
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""
+    pygments.lexers
+    ~~~~~~~~~~~~~~~
 
-import functools
+    Pygments lexers.
+
+    :copyright: Copyright 2006-2021 by the Pygments team, see AUTHORS.
+    :license: BSD, see LICENSE for details.
+"""
+
+import re
 import sys
-import threading
-import time
-import typing as t
-import warnings
-from abc import ABC, abstractmethod
-from concurrent import futures
-from inspect import iscoroutinefunction
+import types
+import fnmatch
+from os.path import basename
 
-# Import all built-in retry strategies for easier usage.
-from .retry import retry_base  # noqa
-from .retry import retry_all  # noqa
-from .retry import retry_always  # noqa
-from .retry import retry_any  # noqa
-from .retry import retry_if_exception  # noqa
-from .retry import retry_if_exception_type  # noqa
-from .retry import retry_if_not_exception_type  # noqa
-from .retry import retry_if_not_result  # noqa
-from .retry import retry_if_result  # noqa
-from .retry import retry_never  # noqa
-from .retry import retry_unless_exception_type  # noqa
-from .retry import retry_if_exception_message  # noqa
-from .retry import retry_if_not_exception_message  # noqa
+from pip._vendor.pygments.lexers._mapping import LEXERS
+from pip._vendor.pygments.modeline import get_filetype_from_buffer
+from pip._vendor.pygments.plugin import find_plugin_lexers
+from pip._vendor.pygments.util import ClassNotFound, guess_decode
 
-# Import all nap strategies for easier usage.
-from .nap import sleep  # noqa
-from .nap import sleep_using_event  # noqa
+COMPAT = {
+    'Python3Lexer': 'PythonLexer',
+    'Python3TracebackLexer': 'PythonTracebackLexer',
+}
 
-# Import all built-in stop strategies for easier usage.
-from .stop import stop_after_attempt  # noqa
-from .stop import stop_after_delay  # noqa
-from .stop import stop_all  # noqa
-from .stop import stop_any  # noqa
-from .stop import stop_never  # noqa
-from .stop import stop_when_event_set  # noqa
+__all__ = ['get_lexer_by_name', 'get_lexer_for_filename', 'find_lexer_class',
+           'guess_lexer', 'load_lexer_from_file'] + list(LEXERS) + list(COMPAT)
 
-# Import all built-in wait strategies for easier usage.
-from .wait import wait_chain  # noqa
-from .wait import wait_combine  # noqa
-from .wait import wait_exponential  # noqa
-from .wait import wait_fixed  # noqa
-from .wait import wait_incrementing  # noqa
-from .wait import wait_none  # noqa
-from .wait import wait_random  # noqa
-from .wait import wait_random_exponential  # noqa
-from .wait import wait_random_exponential as wait_full_jitter  # noqa
-
-# Import all built-in before strategies for easier usage.
-from .before import before_log  # noqa
-from .before import before_nothing  # noqa
-
-# Import all built-in after strategies for easier usage.
-from .after import after_log  # noqa
-from .after import after_nothing  # noqa
-
-# Import all built-in after strategies for easier usage.
-from .before_sleep import before_sleep_log  # noqa
-from .before_sleep import before_sleep_nothing  # noqa
-
-# Replace a conditional import with a hard-coded None so that pip does
-# not attempt to use tornado even if it is present in the environment.
-# If tornado is non-None, tenacity will attempt to execute some code
-# that is sensitive to the version of tornado, which could break pip
-# if an old version is found.
-tornado = None  # type: ignore
-
-if t.TYPE_CHECKING:
-    import types
-
-    from .wait import wait_base
-    from .stop import stop_base
+_lexer_cache = {}
+_pattern_cache = {}
 
 
-WrappedFn = t.TypeVar("WrappedFn", bound=t.Callable)
-_RetValT = t.TypeVar("_RetValT")
+def _fn_matches(fn, glob):
+    """Return whether the supplied file name fn matches pattern filename."""
+    if glob not in _pattern_cache:
+        pattern = _pattern_cache[glob] = re.compile(fnmatch.translate(glob))
+        return pattern.match(fn)
+    return _pattern_cache[glob].match(fn)
 
 
-@t.overload
-def retry(fn: WrappedFn) -> WrappedFn:
-    pass
+def _load_lexers(module_name):
+    """Load a lexer (and all others in the module too)."""
+    mod = __import__(module_name, None, None, ['__all__'])
+    for lexer_name in mod.__all__:
+        cls = getattr(mod, lexer_name)
+        _lexer_cache[cls.name] = cls
 
 
-@t.overload
-def retry(*dargs: t.Any, **dkw: t.Any) -> t.Callable[[WrappedFn], WrappedFn]:  # noqa
-    pass
-
-
-def retry(*dargs: t.Any, **dkw: t.Any) -> t.Union[WrappedFn, t.Callable[[WrappedFn], WrappedFn]]:  # noqa
-    """Wrap a function with a new `Retrying` object.
-
-    :param dargs: positional arguments passed to Retrying object
-    :param dkw: keyword arguments passed to the Retrying object
+def get_all_lexers():
+    """Return a generator of tuples in the form ``(name, aliases,
+    filenames, mimetypes)`` of all know lexers.
     """
-    # support both @retry and @retry() as valid syntax
-    if len(dargs) == 1 and callable(dargs[0]):
-        return retry()(dargs[0])
-    else:
-
-        def wrap(f: WrappedFn) -> WrappedFn:
-            if isinstance(f, retry_base):
-                warnings.warn(
-                    f"Got retry_base instance ({f.__class__.__name__}) as callable argument, "
-                    f"this will probably hang indefinitely (did you mean retry={f.__class__.__name__}(...)?)"
-                )
-            if iscoroutinefunction(f):
-                r: "BaseRetrying" = AsyncRetrying(*dargs, **dkw)
-            elif tornado and hasattr(tornado.gen, "is_coroutine_function") and tornado.gen.is_coroutine_function(f):
-                r = TornadoRetrying(*dargs, **dkw)
-            else:
-                r = Retrying(*dargs, **dkw)
-
-            return r.wraps(f)
-
-        return wrap
+    for item in LEXERS.values():
+        yield item[1:]
+    for lexer in find_plugin_lexers():
+        yield lexer.name, lexer.aliases, lexer.filenames, lexer.mimetypes
 
 
-class TryAgain(Exception):
-    """Always retry the executed function when raised."""
+def find_lexer_class(name):
+    """Lookup a lexer class by name.
 
-
-NO_RESULT = object()
-
-
-class DoAttempt:
-    pass
-
-
-class DoSleep(float):
-    pass
-
-
-class BaseAction:
-    """Base class for representing actions to take by retry object.
-
-    Concrete implementations must define:
-    - __init__: to initialize all necessary fields
-    - REPR_FIELDS: class variable specifying attributes to include in repr(self)
-    - NAME: for identification in retry object methods and callbacks
+    Return None if not found.
     """
-
-    REPR_FIELDS: t.Sequence[str] = ()
-    NAME: t.Optional[str] = None
-
-    def __repr__(self) -> str:
-        state_str = ", ".join(f"{field}={getattr(self, field)!r}" for field in self.REPR_FIELDS)
-        return f"{self.__class__.__name__}({state_str})"
-
-    def __str__(self) -> str:
-        return repr(self)
-
-
-class RetryAction(BaseAction):
-    REPR_FIELDS = ("sleep",)
-    NAME = "retry"
-
-    def __init__(self, sleep: t.SupportsFloat) -> None:
-        self.sleep = float(sleep)
+    if name in _lexer_cache:
+        return _lexer_cache[name]
+    # lookup builtin lexers
+    for module_name, lname, aliases, _, _ in LEXERS.values():
+        if name == lname:
+            _load_lexers(module_name)
+            return _lexer_cache[name]
+    # continue with lexers from setuptools entrypoints
+    for cls in find_plugin_lexers():
+        if cls.name == name:
+            return cls
 
 
-_unset = object()
+def find_lexer_class_by_name(_alias):
+    """Lookup a lexer class by alias.
+
+    Like `get_lexer_by_name`, but does not instantiate the class.
+
+    .. versionadded:: 2.2
+    """
+    if not _alias:
+        raise ClassNotFound('no lexer for alias %r found' % _alias)
+    # lookup builtin lexers
+    for module_name, name, aliases, _, _ in LEXERS.values():
+        if _alias.lower() in aliases:
+            if name not in _lexer_cache:
+                _load_lexers(module_name)
+            return _lexer_cache[name]
+    # continue with lexers from setuptools entrypoints
+    for cls in find_plugin_lexers():
+        if _alias.lower() in cls.aliases:
+            return cls
+    raise ClassNotFound('no lexer for alias %r found' % _alias)
 
 
-def _first_set(first: t.Union[t.Any, object], second: t.Any) -> t.Any:
-    return second if first is _unset else first
+def get_lexer_by_name(_alias, **options):
+    """Get a lexer by an alias.
+
+    Raises ClassNotFound if not found.
+    """
+    if not _alias:
+        raise ClassNotFound('no lexer for alias %r found' % _alias)
+
+    # lookup builtin lexers
+    for module_name, name, aliases, _, _ in LEXERS.values():
+        if _alias.lower() in aliases:
+            if name not in _lexer_cache:
+                _load_lexers(module_name)
+            return _lexer_cache[name](**options)
+    # continue with lexers from setuptools entrypoints
+    for cls in find_plugin_lexers():
+        if _alias.lower() in cls.aliases:
+            return cls(**options)
+    raise ClassNotFound('no lexer for alias %r found' % _alias)
 
 
-class RetryError(Exception):
-    """Encapsulates the last attempt instance right before giving up."""
+def load_lexer_from_file(filename, lexername="CustomLexer", **options):
+    """Load a lexer from a file.
 
-    def __init__(self, last_attempt: "Future") -> None:
-        self.last_attempt = last_attempt
-        super().__init__(last_attempt)
+    This method expects a file located relative to the current working
+    directory, which contains a Lexer class. By default, it expects the
+    Lexer to be name CustomLexer; you can specify your own class name
+    as the second argument to this function.
 
-    def reraise(self) -> "t.NoReturn":
-        if self.last_attempt.failed:
-            raise self.last_attempt.result()
-        raise self
+    Users should be very careful with the input, because this method
+    is equivalent to running eval on the input file.
 
-    def __str__(self) -> str:
-        return f"{self.__class__.__name__}[{self.last_attempt}]"
+    Raises ClassNotFound if there are any problems importing the Lexer.
+
+    .. versionadded:: 2.2
+    """
+    try:
+        # This empty dict will contain the namespace for the exec'd file
+        custom_namespace = {}
+        with open(filename, 'rb') as f:
+            exec(f.read(), custom_namespace)
+        # Retrieve the class `lexername` from that namespace
+        if lexername not in custom_namespace:
+            raise ClassNotFound('no valid %s class found in %s' %
+                                (lexername, filename))
+        lexer_class = custom_namespace[lexername]
+        # And finally instantiate it with the options
+        return lexer_class(**options)
+    except OSError as err:
+        raise ClassNotFound('cannot read %s: %s' % (filename, err))
+    except ClassNotFound:
+        raise
+    except Exception as err:
+        raise ClassNotFound('error when loading custom lexer: %s' % err)
 
 
-class AttemptManager:
-    """Manage attempt context."""
+def find_lexer_class_for_filename(_fn, code=None):
+    """Get a lexer for a filename.
 
-    def __init__(self, retry_state: "RetryCallState"):
-        self.retry_state = retry_state
+    If multiple lexers match the filename pattern, use ``analyse_text()`` to
+    figure out which one is more appropriate.
 
-    def __enter__(self) -> None:
-        pass
+    Returns None if not found.
+    """
+    matches = []
+    fn = basename(_fn)
+    for modname, name, _, filenames, _ in LEXERS.values():
+        for filename in filenames:
+            if _fn_matches(fn, filename):
+                if name not in _lexer_cache:
+                    _load_lexers(modname)
+                matches.append((_lexer_cache[name], filename))
+    for cls in find_plugin_lexers():
+        for filename in cls.filenames:
+            if _fn_matches(fn, filename):
+                matches.append((cls, filename))
 
-    def __exit__(
-        self,
-        exc_type: t.Optional[t.Type[BaseException]],
-        exc_value: t.Optional[BaseException],
-        traceback: t.Optional["types.TracebackType"],
-    ) -> t.Optional[bool]:
-        if isinstance(exc_value, BaseException):
-            self.retry_state.set_exception((exc_type, exc_value, traceback))
-            return True  # Swallow exception.
+    if isinstance(code, bytes):
+        # decode it, since all analyse_text functions expect unicode
+        code = guess_decode(code)
+
+    def get_rating(info):
+        cls, filename = info
+        # explicit patterns get a bonus
+        bonus = '*' not in filename and 0.5 or 0
+        # The class _always_ defines analyse_text because it's included in
+        # the Lexer class.  The default implementation returns None which
+        # gets turned into 0.0.  Run scripts/detect_missing_analyse_text.py
+        # to find lexers which need it overridden.
+        if code:
+            return cls.analyse_text(code) + bonus, cls.__name__
+        return cls.priority + bonus, cls.__name__
+
+    if matches:
+        matches.sort(key=get_rating)
+        # print "Possible lexers, after sort:", matches
+        return matches[-1][0]
+
+
+def get_lexer_for_filename(_fn, code=None, **options):
+    """Get a lexer for a filename.
+
+    If multiple lexers match the filename pattern, use ``analyse_text()`` to
+    figure out which one is more appropriate.
+
+    Raises ClassNotFound if not found.
+    """
+    res = find_lexer_class_for_filename(_fn, code)
+    if not res:
+        raise ClassNotFound('no lexer for filename %r found' % _fn)
+    return res(**options)
+
+
+def get_lexer_for_mimetype(_mime, **options):
+    """Get a lexer for a mimetype.
+
+    Raises ClassNotFound if not found.
+    """
+    for modname, name, _, _, mimetypes in LEXERS.values():
+        if _mime in mimetypes:
+            if name not in _lexer_cache:
+                _load_lexers(modname)
+            return _lexer_cache[name](**options)
+    for cls in find_plugin_lexers():
+        if _mime in cls.mimetypes:
+            return cls(**options)
+    raise ClassNotFound('no lexer for mimetype %r found' % _mime)
+
+
+def _iter_lexerclasses(plugins=True):
+    """Return an iterator over all lexer classes."""
+    for key in sorted(LEXERS):
+        module_name, name = LEXERS[key][:2]
+        if name not in _lexer_cache:
+            _load_lexers(module_name)
+        yield _lexer_cache[name]
+    if plugins:
+        yield from find_plugin_lexers()
+
+
+def guess_lexer_for_filename(_fn, _text, **options):
+    """
+    Lookup all lexers that handle those filenames primary (``filenames``)
+    or secondary (``alias_filenames``). Then run a text analysis for those
+    lexers and choose the best result.
+
+    usage::
+
+        >>> from pygments.lexers import guess_lexer_for_filename
+        >>> guess_lexer_for_filename('hello.html', '<%= @foo %>')
+        <pygments.lexers.templates.RhtmlLexer object at 0xb7d2f32c>
+        >>> guess_lexer_for_filename('hello.html', '<h1>{{ title|e }}</h1>')
+        <pygments.lexers.templates.HtmlDjangoLexer object at 0xb7d2f2ac>
+        >>> guess_lexer_for_filename('style.css', 'a { color: <?= $link ?> }')
+        <pygments.lexers.templates.CssPhpLexer object at 0xb7ba518c>
+    """
+    fn = basename(_fn)
+    primary = {}
+    matching_lexers = set()
+    for lexer in _iter_lexerclasses():
+        for filename in lexer.filenames:
+            if _fn_matches(fn, filename):
+                matching_lexers.add(lexer)
+                primary[lexer] = True
+        for filename in lexer.alias_filenames:
+            if _fn_matches(fn, filename):
+                matching_lexers.add(lexer)
+                primary[lexer] = False
+    if not matching_lexers:
+        raise ClassNotFound('no lexer for filename %r found' % fn)
+    if len(matching_lexers) == 1:
+        return matching_lexers.pop()(**options)
+    result = []
+    for lexer in matching_lexers:
+        rv = lexer.analyse_text(_text)
+        if rv == 1.0:
+            return lexer(**options)
+        result.append((rv, lexer))
+
+    def type_sort(t):
+        # sort by:
+        # - analyse score
+        # - is primary filename pattern?
+        # - priority
+        # - last resort: class name
+        return (t[0], primary[t[1]], t[1].priority, t[1].__name__)
+    result.sort(key=type_sort)
+
+    return result[-1][1](**options)
+
+
+def guess_lexer(_text, **options):
+    """Guess a lexer by strong distinctions in the text (eg, shebang)."""
+
+    if not isinstance(_text, str):
+        inencoding = options.get('inencoding', options.get('encoding'))
+        if inencoding:
+            _text = _text.decode(inencoding or 'utf8')
         else:
-            # We don't have the result, actually.
-            self.retry_state.set_result(None)
-            return None
+            _text, _ = guess_decode(_text)
 
+    # try to get a vim modeline first
+    ft = get_filetype_from_buffer(_text)
 
-class BaseRetrying(ABC):
-    def __init__(
-        self,
-        sleep: t.Callable[[t.Union[int, float]], None] = sleep,
-        stop: "stop_base" = stop_never,
-        wait: "wait_base" = wait_none(),
-        retry: retry_base = retry_if_exception_type(),
-        before: t.Callable[["RetryCallState"], None] = before_nothing,
-        after: t.Callable[["RetryCallState"], None] = after_nothing,
-        before_sleep: t.Optional[t.Callable[["RetryCallState"], None]] = None,
-        reraise: bool = False,
-        retry_error_cls: t.Type[RetryError] = RetryError,
-        retry_error_callback: t.Optional[t.Callable[["RetryCallState"], t.Any]] = None,
-    ):
-        self.sleep = sleep
-        self.stop = stop
-        self.wait = wait
-        self.retry = retry
-        self.before = before
-        self.after = after
-        self.before_sleep = before_sleep
-        self.reraise = reraise
-        self._local = threading.local()
-        self.retry_error_cls = retry_error_cls
-        self.retry_error_callback = retry_error_callback
-
-    def copy(
-        self,
-        sleep: t.Union[t.Callable[[t.Union[int, float]], None], object] = _unset,
-        stop: t.Union["stop_base", object] = _unset,
-        wait: t.Union["wait_base", object] = _unset,
-        retry: t.Union[retry_base, object] = _unset,
-        before: t.Union[t.Callable[["RetryCallState"], None], object] = _unset,
-        after: t.Union[t.Callable[["RetryCallState"], None], object] = _unset,
-        before_sleep: t.Union[t.Optional[t.Callable[["RetryCallState"], None]], object] = _unset,
-        reraise: t.Union[bool, object] = _unset,
-        retry_error_cls: t.Union[t.Type[RetryError], object] = _unset,
-        retry_error_callback: t.Union[t.Optional[t.Callable[["RetryCallState"], t.Any]], object] = _unset,
-    ) -> "BaseRetrying":
-        """Copy this object with some parameters changed if needed."""
-        return self.__class__(
-            sleep=_first_set(sleep, self.sleep),
-            stop=_first_set(stop, self.stop),
-            wait=_first_set(wait, self.wait),
-            retry=_first_set(retry, self.retry),
-            before=_first_set(before, self.before),
-            after=_first_set(after, self.after),
-            before_sleep=_first_set(before_sleep, self.before_sleep),
-            reraise=_first_set(reraise, self.reraise),
-            retry_error_cls=_first_set(retry_error_cls, self.retry_error_cls),
-            retry_error_callback=_first_set(retry_error_callback, self.retry_error_callback),
-        )
-
-    def __repr__(self) -> str:
-        return (
-            f"<{self.__class__.__name__} object at 0x{id(self):x} ("
-            f"stop={self.stop}, "
-            f"wait={self.wait}, "
-            f"sleep={self.sleep}, "
-            f"retry={self.retry}, "
-            f"before={self.before}, "
-            f"after={self.after})>"
-        )
-
-    @property
-    def statistics(self) -> t.Dict[str, t.Any]:
-        """Return a dictionary of runtime statistics.
-
-        This dictionary will be empty when the controller has never been
-        ran. When it is running or has ran previously it should have (but
-        may not) have useful and/or informational keys and values when
-        running is underway and/or completed.
-
-        .. warning:: The keys in this dictionary **should** be some what
-                     stable (not changing), but there existence **may**
-                     change between major releases as new statistics are
-                     gathered or removed so before accessing keys ensure that
-                     they actually exist and handle when they do not.
-
-        .. note:: The values in this dictionary are local to the thread
-                  running call (so if multiple threads share the same retrying
-                  object - either directly or indirectly) they will each have
-                  there own view of statistics they have collected (in the
-                  future we may provide a way to aggregate the various
-                  statistics from each thread).
-        """
+    if ft is not None:
         try:
-            return self._local.statistics
-        except AttributeError:
-            self._local.statistics = {}
-            return self._local.statistics
+            return get_lexer_by_name(ft, **options)
+        except ClassNotFound:
+            pass
 
-    def wraps(self, f: WrappedFn) -> WrappedFn:
-        """Wrap a function for retrying.
-
-        :param f: A function to wraps for retrying.
-        """
-
-        @functools.wraps(f)
-        def wrapped_f(*args: t.Any, **kw: t.Any) -> t.Any:
-            return self(f, *args, **kw)
-
-        def retry_with(*args: t.Any, **kwargs: t.Any) -> WrappedFn:
-            return self.copy(*args, **kwargs).wraps(f)
-
-        wrapped_f.retry = self
-        wrapped_f.retry_with = retry_with
-
-        return wrapped_f
-
-    def begin(self) -> None:
-        self.statistics.clear()
-        self.statistics["start_time"] = time.monotonic()
-        self.statistics["attempt_number"] = 1
-        self.statistics["idle_for"] = 0
-
-    def iter(self, retry_state: "RetryCallState") -> t.Union[DoAttempt, DoSleep, t.Any]:  # noqa
-        fut = retry_state.outcome
-        if fut is None:
-            if self.before is not None:
-                self.before(retry_state)
-            return DoAttempt()
-
-        is_explicit_retry = retry_state.outcome.failed and isinstance(retry_state.outcome.exception(), TryAgain)
-        if not (is_explicit_retry or self.retry(retry_state=retry_state)):
-            return fut.result()
-
-        if self.after is not None:
-            self.after(retry_state)
-
-        self.statistics["delay_since_first_attempt"] = retry_state.seconds_since_start
-        if self.stop(retry_state=retry_state):
-            if self.retry_error_callback:
-                return self.retry_error_callback(retry_state)
-            retry_exc = self.retry_error_cls(fut)
-            if self.reraise:
-                raise retry_exc.reraise()
-            raise retry_exc from fut.exception()
-
-        if self.wait:
-            sleep = self.wait(retry_state=retry_state)
-        else:
-            sleep = 0.0
-        retry_state.next_action = RetryAction(sleep)
-        retry_state.idle_for += sleep
-        self.statistics["idle_for"] += sleep
-        self.statistics["attempt_number"] += 1
-
-        if self.before_sleep is not None:
-            self.before_sleep(retry_state)
-
-        return DoSleep(sleep)
-
-    def __iter__(self) -> t.Generator[AttemptManager, None, None]:
-        self.begin()
-
-        retry_state = RetryCallState(self, fn=None, args=(), kwargs={})
-        while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                yield AttemptManager(retry_state=retry_state)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                self.sleep(do)
-            else:
-                break
-
-    @abstractmethod
-    def __call__(self, fn: t.Callable[..., _RetValT], *args: t.Any, **kwargs: t.Any) -> _RetValT:
-        pass
+    best_lexer = [0.0, None]
+    for lexer in _iter_lexerclasses():
+        rv = lexer.analyse_text(_text)
+        if rv == 1.0:
+            return lexer(**options)
+        if rv > best_lexer[0]:
+            best_lexer[:] = (rv, lexer)
+    if not best_lexer[0] or best_lexer[1] is None:
+        raise ClassNotFound('no lexer matching the text found')
+    return best_lexer[1](**options)
 
 
-class Retrying(BaseRetrying):
-    """Retrying controller."""
+class _automodule(types.ModuleType):
+    """Automatically import lexers."""
 
-    def __call__(self, fn: t.Callable[..., _RetValT], *args: t.Any, **kwargs: t.Any) -> _RetValT:
-        self.begin()
-
-        retry_state = RetryCallState(retry_object=self, fn=fn, args=args, kwargs=kwargs)
-        while True:
-            do = self.iter(retry_state=retry_state)
-            if isinstance(do, DoAttempt):
-                try:
-                    result = fn(*args, **kwargs)
-                except BaseException:  # noqa: B902
-                    retry_state.set_exception(sys.exc_info())
-                else:
-                    retry_state.set_result(result)
-            elif isinstance(do, DoSleep):
-                retry_state.prepare_for_next_attempt()
-                self.sleep(do)
-            else:
-                return do
+    def __getattr__(self, name):
+        info = LEXERS.get(name)
+        if info:
+            _load_lexers(info[0])
+            cls = _lexer_cache[info[1]]
+            setattr(self, name, cls)
+            return cls
+        if name in COMPAT:
+            return getattr(self, COMPAT[name])
+        raise AttributeError(name)
 
 
-class Future(futures.Future):
-    """Encapsulates a (future or past) attempted call to a target function."""
-
-    def __init__(self, attempt_number: int) -> None:
-        super().__init__()
-        self.attempt_number = attempt_number
-
-    @property
-    def failed(self) -> bool:
-        """Return whether a exception is being held in this future."""
-        return self.exception() is not None
-
-    @classmethod
-    def construct(cls, attempt_number: int, value: t.Any, has_exception: bool) -> "Future":
-        """Construct a new Future object."""
-        fut = cls(attempt_number)
-        if has_exception:
-            fut.set_exception(value)
-        else:
-            fut.set_result(value)
-        return fut
-
-
-class RetryCallState:
-    """State related to a single call wrapped with Retrying."""
-
-    def __init__(
-        self,
-        retry_object: BaseRetrying,
-        fn: t.Optional[WrappedFn],
-        args: t.Any,
-        kwargs: t.Any,
-    ) -> None:
-        #: Retry call start timestamp
-        self.start_time = time.monotonic()
-        #: Retry manager object
-        self.retry_object = retry_object
-        #: Function wrapped by this retry call
-        self.fn = fn
-        #: Arguments of the function wrapped by this retry call
-        self.args = args
-        #: Keyword arguments of the function wrapped by this retry call
-        self.kwargs = kwargs
-
-        #: The number of the current attempt
-        self.attempt_number: int = 1
-        #: Last outcome (result or exception) produced by the function
-        self.outcome: t.Optional[Future] = None
-        #: Timestamp of the last outcome
-        self.outcome_timestamp: t.Optional[float] = None
-        #: Time spent sleeping in retries
-        self.idle_for: float = 0.0
-        #: Next action as decided by the retry manager
-        self.next_action: t.Optional[RetryAction] = None
-
-    @property
-    def seconds_since_start(self) -> t.Optional[float]:
-        if self.outcome_timestamp is None:
-            return None
-        return self.outcome_timestamp - self.start_time
-
-    def prepare_for_next_attempt(self) -> None:
-        self.outcome = None
-        self.outcome_timestamp = None
-        self.attempt_number += 1
-        self.next_action = None
-
-    def set_result(self, val: t.Any) -> None:
-        ts = time.monotonic()
-        fut = Future(self.attempt_number)
-        fut.set_result(val)
-        self.outcome, self.outcome_timestamp = fut, ts
-
-    def set_exception(self, exc_info: t.Tuple[t.Type[BaseException], BaseException, "types.TracebackType"]) -> None:
-        ts = time.monotonic()
-        fut = Future(self.attempt_number)
-        fut.set_exception(exc_info[1])
-        self.outcome, self.outcome_timestamp = fut, ts
-
-    def __repr__(self):
-        if self.outcome is None:
-            result = "none yet"
-        elif self.outcome.failed:
-            exception = self.outcome.exception()
-            result = f"failed ({exception.__class__.__name__} {exception})"
-        else:
-            result = f"returned {self.outcome.result()}"
-
-        slept = float(round(self.idle_for, 2))
-        clsname = self.__class__.__name__
-        return f"<{clsname} {id(self)}: attempt #{self.attempt_number}; slept for {slept}; last result: {result}>"
-
-
-from pip._vendor.tenacity._asyncio import AsyncRetrying  # noqa:E402,I100
-
-if tornado:
-    from pip._vendor.tenacity.tornadoweb import TornadoRetrying
+oldmod = sys.modules[__name__]
+newmod = _automodule(__name__)
+newmod.__dict__.update(oldmod.__dict__)
+sys.modules[__name__] = newmod
+del newmod.newmod, newmod.oldmod, newmod.sys, newmod.types
