@@ -1,77 +1,63 @@
-# -*- coding: utf-8 -*-
+"""Stuff that differs in different Python versions and platform
+distributions."""
 
-"""
-requests.compat
-~~~~~~~~~~~~~~~
-
-This module handles import compatibility issues between Python 2 and
-Python 3.
-"""
-
-from pip._vendor import chardet
-
+import logging
+import os
 import sys
 
-# -------
-# Pythons
-# -------
+__all__ = ["get_path_uid", "stdlib_pkgs", "WINDOWS"]
 
-# Syntax sugar.
-_ver = sys.version_info
 
-#: Python 2.x?
-is_py2 = (_ver[0] == 2)
+logger = logging.getLogger(__name__)
 
-#: Python 3.x?
-is_py3 = (_ver[0] == 3)
 
-# Note: We've patched out simplejson support in pip because it prevents
-#       upgrading simplejson on Windows.
-# try:
-#     import simplejson as json
-# except (ImportError, SyntaxError):
-#     # simplejson does not support Python 3.2, it throws a SyntaxError
-#     # because of u'...' Unicode literals.
-import json
+def has_tls() -> bool:
+    try:
+        import _ssl  # noqa: F401  # ignore unused
 
-# ---------
-# Specifics
-# ---------
+        return True
+    except ImportError:
+        pass
 
-if is_py2:
-    from urllib import (
-        quote, unquote, quote_plus, unquote_plus, urlencode, getproxies,
-        proxy_bypass, proxy_bypass_environment, getproxies_environment)
-    from urlparse import urlparse, urlunparse, urljoin, urlsplit, urldefrag
-    from urllib2 import parse_http_list
-    import cookielib
-    from Cookie import Morsel
-    from StringIO import StringIO
-    # Keep OrderedDict for backwards compatibility.
-    from collections import Callable, Mapping, MutableMapping, OrderedDict
+    from pip._vendor.urllib3.util import IS_PYOPENSSL
 
-    builtin_str = str
-    bytes = str
-    str = unicode
-    basestring = basestring
-    numeric_types = (int, long, float)
-    integer_types = (int, long)
-    JSONDecodeError = ValueError
+    return IS_PYOPENSSL
 
-elif is_py3:
-    from urllib.parse import urlparse, urlunparse, urljoin, urlsplit, urlencode, quote, unquote, quote_plus, unquote_plus, urldefrag
-    from urllib.request import parse_http_list, getproxies, proxy_bypass, proxy_bypass_environment, getproxies_environment
-    from http import cookiejar as cookielib
-    from http.cookies import Morsel
-    from io import StringIO
-    # Keep OrderedDict for backwards compatibility.
-    from collections import OrderedDict
-    from collections.abc import Callable, Mapping, MutableMapping
-    from json import JSONDecodeError
 
-    builtin_str = str
-    str = str
-    bytes = bytes
-    basestring = (str, bytes)
-    numeric_types = (int, float)
-    integer_types = (int,)
+def get_path_uid(path: str) -> int:
+    """
+    Return path's uid.
+
+    Does not follow symlinks:
+        https://github.com/pypa/pip/pull/935#discussion_r5307003
+
+    Placed this function in compat due to differences on AIX and
+    Jython, that should eventually go away.
+
+    :raises OSError: When path is a symlink or can't be read.
+    """
+    if hasattr(os, "O_NOFOLLOW"):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        file_uid = os.fstat(fd).st_uid
+        os.close(fd)
+    else:  # AIX and Jython
+        # WARNING: time of check vulnerability, but best we can do w/o NOFOLLOW
+        if not os.path.islink(path):
+            # older versions of Jython don't have `os.fstat`
+            file_uid = os.stat(path).st_uid
+        else:
+            # raise OSError for parity with os.O_NOFOLLOW above
+            raise OSError(f"{path} is a symlink; Will not return uid for symlinks")
+    return file_uid
+
+
+# packages in the stdlib that may have installation metadata, but should not be
+# considered 'installed'.  this theoretically could be determined based on
+# dist.location (py27:`sysconfig.get_paths()['stdlib']`,
+# py26:sysconfig.get_config_vars('LIBDEST')), but fear platform variation may
+# make this ineffective, so hard-coding
+stdlib_pkgs = {"python", "wsgiref", "argparse"}
+
+
+# windows detection, covers cpython and ironpython
+WINDOWS = sys.platform.startswith("win") or (sys.platform == "cli" and os.name == "nt")
