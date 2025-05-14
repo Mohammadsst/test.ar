@@ -1,0 +1,26 @@
+/* app.css or component-specific CSS */
+.aspect-h-2.aspect-w-3 {
+  width: 100%;
+  height: auto;
+}
+
+.aspect-h-4.aspect-w-3 {
+  width: 100%;
+  height: auto;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+
+/* app.css or component-specific CSS */
+.main-image {
+  max-width: 100%;
+  max-height: 500px; /* Adjust as needed */
+}
+
+.thumbnail {
+  max-width: 100%;
+  max-height: 100px; /* Adjust as needed */
+  object-fit: cover; /* Ensures thumbnails are cropped appropriately */
+}

@@ -1,0 +1,89 @@
+@import url("https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Reem+Kufi:wght@400..700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply box-border p-0 m-0 list-none scroll-smooth;
+  }
+  body {
+    @apply bg-slate-100/50;
+    overflow-x: hidden !important;
+  }
+}
+
+@layer components {
+  .flexCenter {
+    @apply flex items-center justify-center;
+  }
+
+  .flexBetween {
+    @apply flex items-center justify-between;
+  }
+  .flexAround {
+    @apply flex items-center justify-around;
+  }
+
+  .flexStart {
+    @apply flex items-center justify-start;
+  }
+
+  .flexEnd {
+    @apply flex items-center justify-end;
+  }
+  .button1 {
+    @apply text-white duration-75 rounded-lg hover:bg-[#C40000] bg-[#C40000];
+  }
+  .buttonDisabled {
+    @apply text-gray-400 bg-gray-200 rounded-lg pointer-events-none;
+  }
+  .roow {
+    @apply p-2 text-right border border-[#C40000];
+  }
+  .roowem {
+    @apply p-2 border border-[#C40000];
+  }
+  .brandSwiper {
+    padding-top: 40px !important;
+    padding-bottom: 40px !important;
+  }
+}
+
+@layer utilities {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 3px;
+    border-radius: 2px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: #09090a;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #eee;
+    border-radius: 20px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #7878a3;
+  }
+}
+@media (max-width: 902px) and (min-width: 767px) {
+  .productGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+}
+@media (max-width: 660px) and (min-width: 530px) {
+  .productGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+}
+@media (max-width: 530px){
+  .productGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}

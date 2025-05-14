@@ -1,0 +1,50 @@
+/* Animation for Automotion messages */
+.automotion-sectionlike {
+  position: relative;
+  height: 30px; /* Adjusted height to fit 2 messages */
+  overflow: hidden;
+}
+
+.messageLike {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  opacity: 0;
+  animation: slideDownLike 8s infinite; /* Total duration for 2 messages */
+  font-size: 12px;
+  text-align: center;
+}
+
+/* First message */
+.messageLike:nth-child(1) {
+  animation-delay: 0s; /* Starts immediately */
+}
+
+/* Second message */
+.messageLike:nth-child(2) {
+  animation-delay: 4s; /* Starts after 4 seconds */
+}
+
+@keyframes slideDownLike {
+  0%,
+  25% {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  25%,
+  50% {
+    transform: translateY(0);
+    opacity: 1; /* Message is visible for 2 seconds */
+  }
+  50%,
+  75% {
+    transform: translateY(0);
+    opacity: 1; /* Message remains visible for another 2 seconds */
+  }
+  75%,
+  100% {
+    transform: translateY(-20px);
+    opacity: 0;
+  }
+}

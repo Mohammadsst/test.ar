@@ -1,0 +1,60 @@
+.automotion-section {
+  position: relative;
+  height: 30px;
+  overflow: hidden;
+}
+
+.message {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  font-weight: bold;
+  opacity: 0;
+  transform: translateY(20px);
+  animation: slideDown 16s infinite; /* زيادة المدة الإجمالية إلى 12 ثانية */
+}
+
+.message:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.message:nth-child(2) {
+  animation-delay: 4s; /* تأخير 4 ثوان للرسالة الثانية */
+}
+
+.message:nth-child(3) {
+  animation-delay: 8s; /* تأخير 8 ثوان للرسالة الثالثة */
+}
+.message:nth-child(4) {
+  animation-delay: 12s; /* تأخير 8 ثوان للرسالة الثالثة */
+}
+
+@keyframes slideDown {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  /* ظهور سريع */
+  5% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  /* ثبات لمدة 2 ثانية */
+  5%,
+  25% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  /* اختفاء تدريجي */
+  30% {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  /* انتظار حتى بداية الدورة التالية */
+  100% {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+}

@@ -1,0 +1,6 @@
+.supplierBg {
+    /* background-image: url('/public/images/seller-profile-default-banner-2.avif'); */
+    background-color: aliceblue;
+    background-repeat: no-repeat;
+    background-size: cover;
+}
