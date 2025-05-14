@@ -1,6 +1,4 @@
-import pkg_resources
+""" Version information """
 
-try:
-    __version__ = pkg_resources.get_distribution('setuptools').version
-except Exception:
-    __version__ = 'unknown'
+__version__ = "2.4.1"
+__version_info__ = (2, 4, 1)
