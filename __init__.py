@@ -1,127 +1,111 @@
 """
-Package containing all pip commands
+pip._vendor is for vendoring dependencies of pip to prevent needing pip to
+depend on something external.
+
+Files inside of pip._vendor should be considered immutable and should only be
+updated to versions from upstream.
 """
+from __future__ import absolute_import
 
-import importlib
-from collections import namedtuple
-from typing import Any, Dict, Optional
+import glob
+import os.path
+import sys
 
-from pip._internal.cli.base_command import Command
+# Downstream redistributors which have debundled our dependencies should also
+# patch this value to be true. This will trigger the additional patching
+# to cause things like "six" to be available as pip.
+DEBUNDLED = False
 
-CommandInfo = namedtuple("CommandInfo", "module_path, class_name, summary")
-
-# This dictionary does a bunch of heavy lifting for help output:
-# - Enables avoiding additional (costly) imports for presenting `--help`.
-# - The ordering matters for help display.
-#
-# Even though the module path starts with the same "pip._internal.commands"
-# prefix, the full path makes testing easier (specifically when modifying
-# `commands_dict` in test setup / teardown).
-commands_dict: Dict[str, CommandInfo] = {
-    "install": CommandInfo(
-        "pip._internal.commands.install",
-        "InstallCommand",
-        "Install packages.",
-    ),
-    "download": CommandInfo(
-        "pip._internal.commands.download",
-        "DownloadCommand",
-        "Download packages.",
-    ),
-    "uninstall": CommandInfo(
-        "pip._internal.commands.uninstall",
-        "UninstallCommand",
-        "Uninstall packages.",
-    ),
-    "freeze": CommandInfo(
-        "pip._internal.commands.freeze",
-        "FreezeCommand",
-        "Output installed packages in requirements format.",
-    ),
-    "list": CommandInfo(
-        "pip._internal.commands.list",
-        "ListCommand",
-        "List installed packages.",
-    ),
-    "show": CommandInfo(
-        "pip._internal.commands.show",
-        "ShowCommand",
-        "Show information about installed packages.",
-    ),
-    "check": CommandInfo(
-        "pip._internal.commands.check",
-        "CheckCommand",
-        "Verify installed packages have compatible dependencies.",
-    ),
-    "config": CommandInfo(
-        "pip._internal.commands.configuration",
-        "ConfigurationCommand",
-        "Manage local and global configuration.",
-    ),
-    "search": CommandInfo(
-        "pip._internal.commands.search",
-        "SearchCommand",
-        "Search PyPI for packages.",
-    ),
-    "cache": CommandInfo(
-        "pip._internal.commands.cache",
-        "CacheCommand",
-        "Inspect and manage pip's wheel cache.",
-    ),
-    "index": CommandInfo(
-        "pip._internal.commands.index",
-        "IndexCommand",
-        "Inspect information available from package indexes.",
-    ),
-    "wheel": CommandInfo(
-        "pip._internal.commands.wheel",
-        "WheelCommand",
-        "Build wheels from your requirements.",
-    ),
-    "hash": CommandInfo(
-        "pip._internal.commands.hash",
-        "HashCommand",
-        "Compute hashes of package archives.",
-    ),
-    "completion": CommandInfo(
-        "pip._internal.commands.completion",
-        "CompletionCommand",
-        "A helper command used for command completion.",
-    ),
-    "debug": CommandInfo(
-        "pip._internal.commands.debug",
-        "DebugCommand",
-        "Show information useful for debugging.",
-    ),
-    "help": CommandInfo(
-        "pip._internal.commands.help",
-        "HelpCommand",
-        "Show help for commands.",
-    ),
-}
+# By default, look in this directory for a bunch of .whl files which we will
+# add to the beginning of sys.path before attempting to import anything. This
+# is done to support downstream re-distributors like Debian and Fedora who
+# wish to create their own Wheels for our dependencies to aid in debundling.
+WHEEL_DIR = os.path.abspath(os.path.dirname(__file__))
 
 
-def create_command(name: str, **kwargs: Any) -> Command:
-    """
-    Create an instance of the Command class with the given name.
-    """
-    module_path, class_name, summary = commands_dict[name]
-    module = importlib.import_module(module_path)
-    command_class = getattr(module, class_name)
-    command = command_class(name=name, summary=summary, **kwargs)
+# Define a small helper function to alias our vendored modules to the real ones
+# if the vendored ones do not exist. This idea of this was taken from
+# https://github.com/kennethreitz/requests/pull/2567.
+def vendored(modulename):
+    vendored_name = "{0}.{1}".format(__name__, modulename)
 
-    return command
-
-
-def get_similar_commands(name: str) -> Optional[str]:
-    """Command name auto-correct."""
-    from difflib import get_close_matches
-
-    name = name.lower()
-
-    close_commands = get_close_matches(name, commands_dict.keys())
-
-    if close_commands:
-        return close_commands[0]
+    try:
+        __import__(modulename, globals(), locals(), level=0)
+    except ImportError:
+        # We can just silently allow import failures to pass here. If we
+        # got to this point it means that ``import pip._vendor.whatever``
+        # failed and so did ``import whatever``. Since we're importing this
+        # upfront in an attempt to alias imports, not erroring here will
+        # just mean we get a regular import error whenever pip *actually*
+        # tries to import one of these modules to use it, which actually
+        # gives us a better error message than we would have otherwise
+        # gotten.
+        pass
     else:
-        return None
+        sys.modules[vendored_name] = sys.modules[modulename]
+        base, head = vendored_name.rsplit(".", 1)
+        setattr(sys.modules[base], head, sys.modules[modulename])
+
+
+# If we're operating in a debundled setup, then we want to go ahead and trigger
+# the aliasing of our vendored libraries as well as looking for wheels to add
+# to our sys.path. This will cause all of this code to be a no-op typically
+# however downstream redistributors can enable it in a consistent way across
+# all platforms.
+if DEBUNDLED:
+    # Actually look inside of WHEEL_DIR to find .whl files and add them to the
+    # front of our sys.path.
+    sys.path[:] = glob.glob(os.path.join(WHEEL_DIR, "*.whl")) + sys.path
+
+    # Actually alias all of our vendored dependencies.
+    vendored("cachecontrol")
+    vendored("certifi")
+    vendored("colorama")
+    vendored("distlib")
+    vendored("distro")
+    vendored("html5lib")
+    vendored("six")
+    vendored("six.moves")
+    vendored("six.moves.urllib")
+    vendored("six.moves.urllib.parse")
+    vendored("packaging")
+    vendored("packaging.version")
+    vendored("packaging.specifiers")
+    vendored("pep517")
+    vendored("pkg_resources")
+    vendored("platformdirs")
+    vendored("progress")
+    vendored("requests")
+    vendored("requests.exceptions")
+    vendored("requests.packages")
+    vendored("requests.packages.urllib3")
+    vendored("requests.packages.urllib3._collections")
+    vendored("requests.packages.urllib3.connection")
+    vendored("requests.packages.urllib3.connectionpool")
+    vendored("requests.packages.urllib3.contrib")
+    vendored("requests.packages.urllib3.contrib.ntlmpool")
+    vendored("requests.packages.urllib3.contrib.pyopenssl")
+    vendored("requests.packages.urllib3.exceptions")
+    vendored("requests.packages.urllib3.fields")
+    vendored("requests.packages.urllib3.filepost")
+    vendored("requests.packages.urllib3.packages")
+    vendored("requests.packages.urllib3.packages.ordered_dict")
+    vendored("requests.packages.urllib3.packages.six")
+    vendored("requests.packages.urllib3.packages.ssl_match_hostname")
+    vendored("requests.packages.urllib3.packages.ssl_match_hostname."
+             "_implementation")
+    vendored("requests.packages.urllib3.poolmanager")
+    vendored("requests.packages.urllib3.request")
+    vendored("requests.packages.urllib3.response")
+    vendored("requests.packages.urllib3.util")
+    vendored("requests.packages.urllib3.util.connection")
+    vendored("requests.packages.urllib3.util.request")
+    vendored("requests.packages.urllib3.util.response")
+    vendored("requests.packages.urllib3.util.retry")
+    vendored("requests.packages.urllib3.util.ssl_")
+    vendored("requests.packages.urllib3.util.timeout")
+    vendored("requests.packages.urllib3.util.url")
+    vendored("resolvelib")
+    vendored("tenacity")
+    vendored("tomli")
+    vendored("urllib3")
