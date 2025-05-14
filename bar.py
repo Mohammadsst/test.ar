@@ -1,93 +1,94 @@
-# -*- coding: utf-8 -*-
+from typing import Optional, Union
 
-# Copyright (c) 2012 Georgios Verigakis <verigak@gmail.com>
-#
-# Permission to use, copy, modify, and distribute this software for any
-# purpose with or without fee is hereby granted, provided that the above
-# copyright notice and this permission notice appear in all copies.
-#
-# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+from .color import Color
+from .console import Console, ConsoleOptions, RenderResult
+from .jupyter import JupyterMixin
+from .measure import Measurement
+from .segment import Segment
+from .style import Style
 
-from __future__ import unicode_literals
-
-import sys
-
-from . import Progress
-from .colors import color
+# There are left-aligned characters for 1/8 to 7/8, but
+# the right-aligned characters exist only for 1/8 and 4/8.
+BEGIN_BLOCK_ELEMENTS = ["█", "█", "█", "▐", "▐", "▐", "▕", "▕"]
+END_BLOCK_ELEMENTS = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+FULL_BLOCK = "█"
 
 
-class Bar(Progress):
-    width = 32
-    suffix = '%(index)d/%(max)d'
-    bar_prefix = ' |'
-    bar_suffix = '| '
-    empty_fill = ' '
-    fill = '#'
-    color = None
+class Bar(JupyterMixin):
+    """Renders a solid block bar.
 
-    def update(self):
-        filled_length = int(self.width * self.progress)
-        empty_length = self.width - filled_length
+    Args:
+        size (float): Value for the end of the bar.
+        begin (float): Begin point (between 0 and size, inclusive).
+        end (float): End point (between 0 and size, inclusive).
+        width (int, optional): Width of the bar, or ``None`` for maximum width. Defaults to None.
+        color (Union[Color, str], optional): Color of the bar. Defaults to "default".
+        bgcolor (Union[Color, str], optional): Color of bar background. Defaults to "default".
+    """
 
-        message = self.message % self
-        bar = color(self.fill * filled_length, fg=self.color)
-        empty = self.empty_fill * empty_length
-        suffix = self.suffix % self
-        line = ''.join([message, self.bar_prefix, bar, empty, self.bar_suffix,
-                        suffix])
-        self.writeln(line)
+    def __init__(
+        self,
+        size: float,
+        begin: float,
+        end: float,
+        *,
+        width: Optional[int] = None,
+        color: Union[Color, str] = "default",
+        bgcolor: Union[Color, str] = "default",
+    ):
+        self.size = size
+        self.begin = max(begin, 0)
+        self.end = min(end, size)
+        self.width = width
+        self.style = Style(color=color, bgcolor=bgcolor)
 
+    def __repr__(self) -> str:
+        return f"Bar({self.size}, {self.begin}, {self.end})"
 
-class ChargingBar(Bar):
-    suffix = '%(percent)d%%'
-    bar_prefix = ' '
-    bar_suffix = ' '
-    empty_fill = '∙'
-    fill = '█'
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
 
+        width = min(
+            self.width if self.width is not None else options.max_width,
+            options.max_width,
+        )
 
-class FillingSquaresBar(ChargingBar):
-    empty_fill = '▢'
-    fill = '▣'
+        if self.begin >= self.end:
+            yield Segment(" " * width, self.style)
+            yield Segment.line()
+            return
 
+        prefix_complete_eights = int(width * 8 * self.begin / self.size)
+        prefix_bar_count = prefix_complete_eights // 8
+        prefix_eights_count = prefix_complete_eights % 8
 
-class FillingCirclesBar(ChargingBar):
-    empty_fill = '◯'
-    fill = '◉'
+        body_complete_eights = int(width * 8 * self.end / self.size)
+        body_bar_count = body_complete_eights // 8
+        body_eights_count = body_complete_eights % 8
 
+        # When start and end fall into the same cell, we ideally should render
+        # a symbol that's "center-aligned", but there is no good symbol in Unicode.
+        # In this case, we fall back to right-aligned block symbol for simplicity.
 
-class IncrementalBar(Bar):
-    if sys.platform.startswith('win'):
-        phases = (u' ', u'▌', u'█')
-    else:
-        phases = (' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█')
+        prefix = " " * prefix_bar_count
+        if prefix_eights_count:
+            prefix += BEGIN_BLOCK_ELEMENTS[prefix_eights_count]
 
-    def update(self):
-        nphases = len(self.phases)
-        filled_len = self.width * self.progress
-        nfull = int(filled_len)                      # Number of full chars
-        phase = int((filled_len - nfull) * nphases)  # Phase of last char
-        nempty = self.width - nfull                  # Number of empty chars
+        body = FULL_BLOCK * body_bar_count
+        if body_eights_count:
+            body += END_BLOCK_ELEMENTS[body_eights_count]
 
-        message = self.message % self
-        bar = color(self.phases[-1] * nfull, fg=self.color)
-        current = self.phases[phase] if phase > 0 else ''
-        empty = self.empty_fill * max(0, nempty - len(current))
-        suffix = self.suffix % self
-        line = ''.join([message, self.bar_prefix, bar, current, empty,
-                        self.bar_suffix, suffix])
-        self.writeln(line)
+        suffix = " " * (width - len(body))
 
+        yield Segment(prefix + body[len(prefix) :] + suffix, self.style)
+        yield Segment.line()
 
-class PixelBar(IncrementalBar):
-    phases = ('⡀', '⡄', '⡆', '⡇', '⣇', '⣧', '⣷', '⣿')
-
-
-class ShadyBar(IncrementalBar):
-    phases = (' ', '░', '▒', '▓', '█')
+    def __rich_measure__(
+        self, console: Console, options: ConsoleOptions
+    ) -> Measurement:
+        return (
+            Measurement(self.width, self.width)
+            if self.width is not None
+            else Measurement(4, options.max_width)
+        )
