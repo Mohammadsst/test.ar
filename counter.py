@@ -15,31 +15,33 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 from __future__ import unicode_literals
-from . import Infinite
+from . import Infinite, Progress
 
 
-class Spinner(Infinite):
-    phases = ('-', '\\', '|', '/')
-    hide_cursor = True
+class Counter(Infinite):
+    def update(self):
+        message = self.message % self
+        line = ''.join([message, str(self.index)])
+        self.writeln(line)
+
+
+class Countdown(Progress):
+    def update(self):
+        message = self.message % self
+        line = ''.join([message, str(self.remaining)])
+        self.writeln(line)
+
+
+class Stack(Progress):
+    phases = (' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█')
 
     def update(self):
-        i = self.index % len(self.phases)
+        nphases = len(self.phases)
+        i = min(nphases - 1, int(self.progress * nphases))
         message = self.message % self
         line = ''.join([message, self.phases[i]])
         self.writeln(line)
 
 
-class PieSpinner(Spinner):
-    phases = ['◷', '◶', '◵', '◴']
-
-
-class MoonSpinner(Spinner):
-    phases = ['◑', '◒', '◐', '◓']
-
-
-class LineSpinner(Spinner):
-    phases = ['⎺', '⎻', '⎼', '⎽', '⎼', '⎻']
-
-
-class PixelSpinner(Spinner):
-    phases = ['⣾', '⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽']
+class Pie(Stack):
+    phases = ('○', '◔', '◑', '◕', '●')
